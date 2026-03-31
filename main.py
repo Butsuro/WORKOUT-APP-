@@ -3,6 +3,19 @@ import pandas as pd
 import numpy as np
 import h5py
 import matplotlib.pyplot as plt
+#step 4 library
+from scipy.signal import butter, filtfilt
+from scipy.stats import skew, kurtosis
+from sklearn.preprocessing import MinMaxScaler
+
+
+from sklearn.model_selection import train_test_split
+from sklearn.linear_model import LogisticRegression
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
+import pickle
+import json
+
 
 data_folder = "rawData"
 
@@ -115,46 +128,33 @@ with h5py.File("project_data.h5", "r") as hdf5_file:
         #plt.tight_layout()
         #plt.show()
         
-# -----------------------------------------------------------------------
-# Step 4 - Pre-processing
-# -----------------------------------------------------------------------
-
-from scipy.signal import butter, filtfilt
-
-WINDOW_SIZE = 8       
-HIGHPASS_CUTOFF = 0.3  
-SAMPLE_RATE = 100       
+#Step 4
+WINDOW_SIZE = 5
+HIGHPASS_CUTOFF = 0.25
+SAMPLE_RATE = 100
 
 def fill_missing(df):
-    """Fill any missing values using forward fill then backward fill.
-    Forward fill covers gaps mid-signal, backward fill handles NaNs at the start."""
     return df.ffill().bfill()
-
+#window size function
 def apply_sma(df, window_size=WINDOW_SIZE):
-    """Apply a Simple Moving Average filter to Ax, Ay, Az columns.
-    Center=True means the window is centered around each point for minimal lag."""
     smoothed = df.copy()
     for col in ["Ax", "Ay", "Az"]:
         smoothed[col] = df[col].rolling(window=window_size, center=True).mean()
-    # Rolling creates NaNs at edges — fill those too
     return smoothed.ffill().bfill()
 
+#high-pass filter
 def apply_highpass(df, cutoff=HIGHPASS_CUTOFF, fs=SAMPLE_RATE, order=4):
-    """Apply a Butterworth high-pass filter to Ax, Ay, Az columns.
-    Applied on top of the SMA output to remove any remaining gravity
-    and low-frequency baseline drift that SMA alone cannot eliminate.
-    - cutoff: frequency below which signals are removed (Hz)
-    - fs: sample rate of the data (Hz)
-    - order: filter sharpness — higher = steeper cutoff"""
     filtered = df.copy()
-    # Normalized cutoff: must be between 0 and 1 (1 = Nyquist frequency)
+
     nyquist = 0.5 * fs
     normalized_cutoff = cutoff / nyquist
-    # Design the Butterworth high-pass filter
     b, a = butter(order, normalized_cutoff, btype="high", analog=False)
+
     for col in ["Ax", "Ay", "Az"]:
-        # filtfilt applies the filter twice (forward + backward) for zero phase distortion
+        mean_val = df[col].mean()              #save original mean so it doesnt merge all axis together
         filtered[col] = filtfilt(b, a, df[col].values)
+        filtered[col] += mean_val              #bring back the original mean
+
     return filtered
 
 # Dictionary to hold plot samples per member: member -> list of (filename, raw_df, final_df)
@@ -165,8 +165,7 @@ member_plot_data = {}
 with h5py.File("project_data.h5", "a") as hdf5_file:
 
     # Create the top-level preprocessed group
-    preprocessed_group = hdf5_file.create_group("preprocessed")
-
+    preprocessed_group = hdf5_file.require_group("preprocessed")
     # Loop through each member's folder
     for member in os.listdir(data_folder):
         member_path = os.path.join(data_folder, member)
@@ -175,7 +174,7 @@ with h5py.File("project_data.h5", "a") as hdf5_file:
             print(f"Preprocessing: {member}")
 
             # Create a subgroup for this member under preprocessed
-            member_group = preprocessed_group.create_group(member)
+            member_group = preprocessed_group.require_group(member)
             member_plot_data[member] = []
 
             # Loop through each CSV file and apply preprocessing
@@ -212,8 +211,7 @@ with h5py.File("project_data.h5", "a") as hdf5_file:
 
 print("Preprocessed data saved to HDF5.")
 
-# --- Step 4 Visualization: Raw vs Combined (SMA + High-Pass), first 5 seconds only ---
-# One window per member, 6 rows x 2 cols (12 graphs: left=Raw, right=Combined)
+#Raw and proccessed data algorithms
 colors = {"Ax": "red", "Ay": "green", "Az": "blue"}
 
 for member, samples in member_plot_data.items():
@@ -229,15 +227,15 @@ for member, samples in member_plot_data.items():
 
     for row, (name, raw_df, final_df) in enumerate(samples):
 
-        # Limit both signals to the first 5 seconds for display
+        #Limit to first 5 seconds
         raw_5s   = raw_df[raw_df["Time"] <= 5]
         final_5s = final_df[final_df["Time"] <= 5]
 
-        # Handle edge case where there is only 1 file (axes won't be 2D)
+        #Edge cases
         ax_raw   = axes[row, 0] if num_files > 1 else axes[0]
         ax_final = axes[row, 1] if num_files > 1 else axes[1]
 
-        # Left column: Raw data with all 3 axes overlaid
+        #Raw data on the left
         for col, color in colors.items():
             ax_raw.plot(raw_5s["Time"], raw_5s[col], color=color, alpha=0.6, label=col)
         ax_raw.set_title(f"{name} — Raw (First 5s)")
@@ -246,7 +244,7 @@ for member, samples in member_plot_data.items():
         ax_raw.legend(fontsize=7)
         ax_raw.grid(True)
 
-        # Right column: SMA + High-Pass combined result with all 3 axes overlaid
+        #Processed data on the right
         for col, color in colors.items():
             ax_final.plot(final_5s["Time"], final_5s[col], color=color, linewidth=1.5, label=col)
         ax_final.set_title(f"{name} — SMA + High-Pass Combined (First 5s)")
@@ -255,5 +253,549 @@ for member, samples in member_plot_data.items():
         ax_final.legend(fontsize=7)
         ax_final.grid(True)
 
+    #plt.tight_layout()
+    #plt.show()
+
+
+# Step 5: Feature Extraction & Normalization 
+#Feature extraction function
+def extract_features(df):
+    """
+    Extract ≥10 features from Ax, Ay, Az, and Magnitude.
+    Returns a dictionary of features.
+    """
+    features = {}
+    axes = ["Ax", "Ay", "Az"]
+    df["Magnitude"] = np.sqrt(df["Ax"]**2 + df["Ay"]**2 + df["Az"]**2)
+    axes.append("Magnitude")
+    
+    for axis in axes:
+        col = df[axis]
+        features[f"{axis}_mean"] = col.mean()
+        features[f"{axis}_median"] = col.median()
+        features[f"{axis}_std"] = col.std()
+        features[f"{axis}_var"] = col.var()
+        features[f"{axis}_max"] = col.max()
+        features[f"{axis}_min"] = col.min()
+        features[f"{axis}_range"] = col.max() - col.min()
+        features[f"{axis}_rms"] = np.sqrt(np.mean(col**2))
+        features[f"{axis}_skew"] = skew(col)
+        features[f"{axis}_kurtosis"] = kurtosis(col)
+    return features
+
+#Normalization function
+def normalize_features(feature_dict, method="minmax"):
+    """
+    Normalize features using Min-Max scaling (default) or z-score.
+    """
+    keys = list(feature_dict.keys())
+    values = np.array([feature_dict[k] for k in keys]).reshape(-1, 1)
+
+    if method == "minmax":
+        scaler = MinMaxScaler()
+        normalized = scaler.fit_transform(values).flatten()
+    elif method == "zscore":
+        normalized = (values - values.mean()) / values.std()
+        normalized = normalized.flatten()
+    else:
+        raise ValueError("Normalization method must be 'minmax' or 'zscore'")
+
+    normalized_dict = {k: v for k, v in zip(keys, normalized)}
+    return normalized_dict
+
+#plot
+def plot_features(features, title, ax=None):
+    keys = list(features.keys())
+    values = [features[k] for k in keys]
+    
+    if ax is None:
+        fig, ax = plt.subplots(figsize=(12, 5))
+    
+    ax.bar(range(len(values)), values, color="skyblue")
+    ax.set_xticks(range(len(values)))
+    ax.set_xticklabels(keys, rotation=45, ha="right", fontsize=8)
+    ax.set_ylabel("Normalized Value")
+    ax.set_title(title)
+    ax.grid(True)
+
+for member, samples in member_plot_data.items():
+    print(f"\nFeature extraction & normalization for member: {member}")
+    
+    num_files = len(samples)
+    fig, axes = plt.subplots(num_files, 1, figsize=(14, 4*num_files))
+    
+    if num_files == 1:
+        axes = [axes]
+
+    for idx, (name, raw_df, final_df) in enumerate(samples):
+        # Extract features from 5-second preprocessed data
+        features = extract_features(final_df)
+        normalized_features = normalize_features(features, method="minmax")
+        
+        # Plot normalized features
+        plot_features(normalized_features, title=f"{member} | {name} | Normalized Features", ax=axes[idx])
+
     plt.tight_layout()
     plt.show()
+
+# Step 6 - Logistic Regression Classifier with Training Curves
+
+from sklearn.linear_model import SGDClassifier
+from sklearn.metrics import accuracy_score, classification_report, confusion_matrix, log_loss
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+import h5py
+import pickle
+import json
+
+WINDOW_SECONDS = 5
+SAMPLE_RATE = 100
+SAMPLES_PER_WINDOW = WINDOW_SECONDS * SAMPLE_RATE
+RANDOM_SEED = 42
+np.random.seed(RANDOM_SEED)
+
+def segment_data(df, label):
+    segments = []
+    num_windows = len(df) // SAMPLES_PER_WINDOW
+
+    for i in range(num_windows):
+        start = i * SAMPLES_PER_WINDOW
+        end = start + SAMPLES_PER_WINDOW
+        segment = df.iloc[start:end].copy()
+        segments.append((segment, label))
+
+    return segments
+
+def get_label(filename):
+    filename = filename.lower()
+    if "walk" in filename:
+        return 0
+    elif "jump" in filename:
+        return 1
+    return None
+
+# ---------------------------------------------------
+# 1. Split FILES by class first (prevents leakage)
+# ---------------------------------------------------
+walk_files = []
+jump_files = []
+
+with h5py.File("project_data.h5", "r") as f:
+    preprocessed = f["preprocessed"]
+
+    for member in preprocessed.keys():
+        for name in preprocessed[member].keys():
+            label = get_label(name)
+            if label == 0:
+                walk_files.append((member, name))
+            elif label == 1:
+                jump_files.append((member, name))
+
+np.random.shuffle(walk_files)
+np.random.shuffle(jump_files)
+
+# 80% train, 10% validation, 10% test
+n_walk = len(walk_files)
+n_jump = len(jump_files)
+
+train_walk_end = int(0.8 * n_walk)
+val_walk_end = int(0.9 * n_walk)
+
+train_jump_end = int(0.8 * n_jump)
+val_jump_end = int(0.9 * n_jump)
+
+train_files = walk_files[:train_walk_end] + jump_files[:train_jump_end]
+val_files   = walk_files[train_walk_end:val_walk_end] + jump_files[train_jump_end:val_jump_end]
+test_files  = walk_files[val_walk_end:] + jump_files[val_jump_end:]
+
+np.random.shuffle(train_files)
+np.random.shuffle(val_files)
+np.random.shuffle(test_files)
+
+print("Train files:", len(train_files))
+print("Validation files:", len(val_files))
+print("Test files:", len(test_files))
+
+# ---------------------------------------------------
+# 2. Convert files into 5-second segments
+# ---------------------------------------------------
+train_segments = []
+val_segments = []
+test_segments = []
+
+with h5py.File("project_data.h5", "r") as f:
+    preprocessed = f["preprocessed"]
+
+    for member, name in train_files:
+        data = preprocessed[member][name][:]
+        df = pd.DataFrame(data, columns=["Time", "Ax", "Ay", "Az"])
+        label = get_label(name)
+        train_segments.extend(segment_data(df, label))
+
+    for member, name in val_files:
+        data = preprocessed[member][name][:]
+        df = pd.DataFrame(data, columns=["Time", "Ax", "Ay", "Az"])
+        label = get_label(name)
+        val_segments.extend(segment_data(df, label))
+
+    for member, name in test_files:
+        data = preprocessed[member][name][:]
+        df = pd.DataFrame(data, columns=["Time", "Ax", "Ay", "Az"])
+        label = get_label(name)
+        test_segments.extend(segment_data(df, label))
+
+print("Train segments:", len(train_segments)) 
+print("Validation segments:", len(val_segments)) 
+print("Test segments:", len(test_segments)) 
+
+np.random.shuffle(train_segments)
+np.random.shuffle(val_segments)
+np.random.shuffle(test_segments)
+
+
+# ---------------------------------------------------
+# SAVE SEGMENTED DATA TO HDF5 (REQUIRED)
+# ---------------------------------------------------
+with h5py.File("project_data.h5", "a") as f:
+    segmented_group = f.require_group("segmented")
+
+    train_group = segmented_group.require_group("train")
+    val_group = segmented_group.require_group("val")
+    test_group = segmented_group.require_group("test")
+
+    # Train
+    for i, (seg_df, label) in enumerate(train_segments):
+        dset = train_group.create_dataset(f"seg_{i}", data=seg_df.values)
+        dset.attrs["label"] = label
+
+    # Validation
+    for i, (seg_df, label) in enumerate(val_segments):
+        dset = val_group.create_dataset(f"seg_{i}", data=seg_df.values)
+        dset.attrs["label"] = label
+
+    # Test
+    for i, (seg_df, label) in enumerate(test_segments):
+        dset = test_group.create_dataset(f"seg_{i}", data=seg_df.values)
+        dset.attrs["label"] = label
+
+print("Segmented data saved to HDF5.")
+
+# ---------------------------------------------------
+# 3. Feature extraction
+# ---------------------------------------------------
+X_train, y_train = [], []
+X_val, y_val = [], []
+X_test, y_test = [], []
+
+# Get consistent feature order from one sample
+sample_df, _ = train_segments[0]
+feature_names = list(extract_features(sample_df.copy()).keys())
+
+# Train set
+for seg_df, label in train_segments:
+    features = extract_features(seg_df.copy())
+    X_train.append([features[k] for k in feature_names])
+    y_train.append(label)
+
+# Validation set
+for seg_df, label in val_segments:
+    features = extract_features(seg_df.copy())
+    X_val.append([features[k] for k in feature_names])
+    y_val.append(label)
+
+# Test set
+for seg_df, label in test_segments:
+    features = extract_features(seg_df.copy())
+    X_test.append([features[k] for k in feature_names])
+    y_test.append(label)
+
+X_train = np.array(X_train)
+X_val = np.array(X_val)
+X_test = np.array(X_test)
+
+y_train = np.array(y_train)
+y_val = np.array(y_val)
+y_test = np.array(y_test)
+
+print("\nClass distribution:")
+print("Train -> Walking:", np.sum(y_train == 0), "Jumping:", np.sum(y_train == 1))
+print("Val   -> Walking:", np.sum(y_val == 0), "Jumping:", np.sum(y_val == 1))
+print("Test  -> Walking:", np.sum(y_test == 0), "Jumping:", np.sum(y_test == 1))
+
+# ---------------------------------------------------
+# 4. Normalize using ONLY training data
+# ---------------------------------------------------
+scaler = StandardScaler()
+X_train = scaler.fit_transform(X_train)
+X_val = scaler.transform(X_val)
+X_test = scaler.transform(X_test)
+
+# ---------------------------------------------------
+# 5. Train logistic regression epoch-by-epoch
+# ---------------------------------------------------
+epochs = 12
+model = SGDClassifier(
+    loss="log_loss",      # logistic regression
+    max_iter=1,
+    tol=None,
+    random_state=RANDOM_SEED
+)
+
+train_loss_history = []
+val_loss_history = []
+train_acc_history = []
+val_acc_history = []
+
+classes = np.array([0, 1])
+
+for epoch in range(epochs):
+    # shuffle training data each epoch
+    indices = np.random.permutation(len(X_train))
+    X_train_epoch = X_train[indices]
+    y_train_epoch = y_train[indices]
+
+    if epoch == 0:
+        model.partial_fit(X_train_epoch, y_train_epoch, classes=classes)
+    else:
+        model.partial_fit(X_train_epoch, y_train_epoch)
+
+    # predicted probabilities for loss
+    train_probs = model.predict_proba(X_train)
+    val_probs = model.predict_proba(X_val)
+
+    # predicted labels for accuracy
+    y_train_pred = model.predict(X_train)
+    y_val_pred = model.predict(X_val)
+
+    train_loss = log_loss(y_train, train_probs)
+    val_loss = log_loss(y_val, val_probs)
+    train_acc = accuracy_score(y_train, y_train_pred)
+    val_acc = accuracy_score(y_val, y_val_pred)
+
+    train_loss_history.append(train_loss)
+    val_loss_history.append(val_loss)
+    train_acc_history.append(train_acc)
+    val_acc_history.append(val_acc)
+
+    print(
+        f"Epoch {epoch+1:02d}/{epochs} | "
+        f"Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f} | "
+        f"Train Acc: {train_acc:.4f} | Val Acc: {val_acc:.4f}"
+    )
+
+# ---------------------------------------------------
+# 6. Final evaluation on test set
+# ---------------------------------------------------
+y_test_pred = model.predict(X_test)
+test_accuracy = accuracy_score(y_test, y_test_pred)
+cm = confusion_matrix(y_test, y_test_pred)
+
+print("\nFinal Test Accuracy:", test_accuracy)
+print("\nClassification Report:")
+print(classification_report(y_test, y_test_pred, target_names=["Walking", "Jumping"]))
+
+print("\nConfusion Matrix:")
+print(cm)
+
+# ---------------------------------------------------
+# 7. Plot training curves
+# ---------------------------------------------------
+epochs_range = range(1, epochs + 1)
+
+plt.figure(figsize=(10, 5))
+plt.plot(epochs_range, train_loss_history, label="Training Loss")
+plt.plot(epochs_range, val_loss_history, label="Validation Loss")
+plt.xlabel("Epoch")
+plt.ylabel("Log Loss")
+plt.title("Logistic Regression Training Curve - Loss")
+plt.legend()
+plt.grid(True)
+plt.tight_layout()
+plt.show()
+
+plt.figure(figsize=(10, 5))
+plt.plot(epochs_range, train_acc_history, label="Training Accuracy")
+plt.plot(epochs_range, val_acc_history, label="Validation Accuracy")
+plt.xlabel("Epoch")
+plt.ylabel("Accuracy")
+plt.title("Logistic Regression Training Curve - Accuracy")
+plt.legend()
+plt.grid(True)
+plt.tight_layout()
+plt.show()
+
+# ---------------------------------------------------
+# 8. Save results
+# ---------------------------------------------------
+with open("step6_results.json", "w") as f:
+    json.dump({
+        "test_accuracy": float(test_accuracy),
+        "train_loss_history": [float(x) for x in train_loss_history],
+        "val_loss_history": [float(x) for x in val_loss_history],
+        "train_acc_history": [float(x) for x in train_acc_history],
+        "val_acc_history": [float(x) for x in val_acc_history],
+        "confusion_matrix": cm.tolist()
+    }, f, indent=4)
+
+with open("step6_model.pkl", "wb") as f:
+    pickle.dump({
+        "model": model,
+        "scaler": scaler,
+        "feature_names": feature_names
+    }, f)
+
+print("\nStep 6 completed properly: model trained, training curves recorded, and test accuracy saved.")
+
+import tkinter as tk
+from tkinter import filedialog, ttk
+import pandas as pd
+import numpy as np
+import pickle
+
+# ---------------------------
+# LOAD MODEL + FEATURE ORDER
+# ---------------------------
+with open("step6_model.pkl", "rb") as f:
+    saved = pickle.load(f)
+    model = saved["model"]
+    scaler = saved["scaler"]
+    feature_names = saved["feature_names"]
+
+WINDOW_SECONDS = 5
+SAMPLE_RATE = 100
+SAMPLES_PER_WINDOW = WINDOW_SECONDS * SAMPLE_RATE
+
+# ---------------------------
+# SAME FEATURE FUNCTION (UNCHANGED)
+# ---------------------------
+from scipy.stats import skew, kurtosis
+
+def extract_features(df):
+    features = {}
+    axes = ["Ax", "Ay", "Az"]
+    df["Magnitude"] = np.sqrt(df["Ax"]**2 + df["Ay"]**2 + df["Az"]**2)
+    axes.append("Magnitude")
+
+    for axis in axes:
+        col = df[axis]
+        features[f"{axis}_mean"] = col.mean()
+        features[f"{axis}_median"] = col.median()
+        features[f"{axis}_std"] = col.std()
+        features[f"{axis}_var"] = col.var()
+        features[f"{axis}_max"] = col.max()
+        features[f"{axis}_min"] = col.min()
+        features[f"{axis}_range"] = col.max() - col.min()
+        features[f"{axis}_rms"] = np.sqrt(np.mean(col**2))
+        features[f"{axis}_skew"] = skew(col)
+        features[f"{axis}_kurtosis"] = kurtosis(col)
+
+    return features
+
+# ---------------------------
+# SEGMENT
+# ---------------------------
+def segment_data(df):
+    segments = []
+    num_windows = len(df) // SAMPLES_PER_WINDOW
+
+    for i in range(num_windows):
+        start = i * SAMPLES_PER_WINDOW
+        end = start + SAMPLES_PER_WINDOW
+        segments.append(df.iloc[start:end])
+
+    return segments
+
+# ---------------------------
+# APP
+# ---------------------------
+class App:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Activity Classifier")
+
+        self.frame = tk.Frame(root)
+        self.frame.pack(fill="both", expand=True)
+
+        self.home()
+
+    def home(self):
+        self.clear()
+
+        tk.Label(self.frame, text="Upload CSV", font=("Arial", 18)).pack(pady=20)
+        tk.Button(self.frame, text="Upload File", command=self.upload).pack(pady=10)
+
+    def loading(self):
+        self.clear()
+        tk.Label(self.frame, text="Processing...", font=("Arial", 16)).pack(pady=50)
+
+    def results(self, df):
+        self.clear()
+
+        tree = ttk.Treeview(self.frame)
+        tree["columns"] = ("Window", "Label")
+
+        tree.heading("#0", text="")
+        tree.heading("Window", text="Window")
+        tree.heading("Label", text="Label")
+
+        tree.column("#0", width=0)
+        tree.column("Window", width=100)
+        tree.column("Label", width=150)
+
+        for _, row in df.iterrows():
+            tree.insert("", "end", values=(row["Window"], row["Label"]))
+
+        tree.pack(fill="both", expand=True)
+
+    def upload(self):
+        path = filedialog.askopenfilename(filetypes=[("CSV", "*.csv")])
+        if not path:
+            return
+
+        self.loading()
+        self.root.update()
+
+        df = pd.read_csv(path)
+
+        df = df[
+            [
+                "Time (s)",
+                "Acceleration x (m/s^2)",
+                "Acceleration y (m/s^2)",
+                "Acceleration z (m/s^2)",
+            ]
+        ]
+        df.columns = ["Time", "Ax", "Ay", "Az"]
+
+        segments = segment_data(df)
+
+        results = []
+
+        for i, seg in enumerate(segments):
+            feats = extract_features(seg.copy())
+
+            # 🔴 CRITICAL: match training order
+            X = np.array([feats[k] for k in feature_names]).reshape(1, -1)
+
+            X = scaler.transform(X)
+            pred = model.predict(X)[0]
+
+            label = "Walking" if pred == 0 else "Jumping"
+
+            results.append({"Window": i, "Label": label})
+
+        out_df = pd.DataFrame(results)
+        out_df.to_csv("output_labels.csv", index=False)
+
+        self.results(out_df)
+
+    def clear(self):
+        for w in self.frame.winfo_children():
+            w.destroy()
+
+# RUN
+root = tk.Tk()
+root.geometry("400x500")
+App(root)
+root.mainloop()
