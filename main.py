@@ -16,6 +16,12 @@ from sklearn.metrics import accuracy_score, classification_report, confusion_mat
 import pickle
 import json
 
+#step 6 libraries
+from sklearn.linear_model import SGDClassifier
+from sklearn.metrics import log_loss
+
+
+
 
 data_folder = "rawData"
 
@@ -158,13 +164,13 @@ def apply_highpass(df, cutoff=HIGHPASS_CUTOFF, fs=SAMPLE_RATE, order=4):
     return filtered
 
 # Dictionary to hold plot samples per member: member -> list of (filename, raw_df, final_df)
-# final_df = SMA then high-pass applied in sequence — this is what gets saved and plotted
+# final_df = SMA then high-pass applied in sequence
 member_plot_data = {}
 
 # Open HDF5 in append mode to add the preprocessed group alongside raw
 with h5py.File("project_data.h5", "a") as hdf5_file:
 
-    # Create the top-level preprocessed group
+    # Create the preprocessed group
     preprocessed_group = hdf5_file.require_group("preprocessed")
     # Loop through each member's folder
     for member in os.listdir(data_folder):
@@ -198,7 +204,7 @@ with h5py.File("project_data.h5", "a") as hdf5_file:
                     df_smoothed = apply_sma(df_filled)
 
                     # Step 4c: Apply high-pass filter directly on the SMA result
-                    # The two filters are chained — high-pass receives SMA output as its input
+                    # The two filters are chained, high-pass receives SMA output as its input
                     df_final = apply_highpass(df_smoothed)
 
                     # Save the fully processed data (SMA + high-pass combined) into HDF5
@@ -257,13 +263,9 @@ for member, samples in member_plot_data.items():
     #plt.show()
 
 
-# Step 5: Feature Extraction & Normalization 
+# Step 5
 #Feature extraction function
 def extract_features(df):
-    """
-    Extract ≥10 features from Ax, Ay, Az, and Magnitude.
-    Returns a dictionary of features.
-    """
     features = {}
     axes = ["Ax", "Ay", "Az"]
     df["Magnitude"] = np.sqrt(df["Ax"]**2 + df["Ay"]**2 + df["Az"]**2)
@@ -285,9 +287,6 @@ def extract_features(df):
 
 #Normalization function
 def normalize_features(feature_dict, method="minmax"):
-    """
-    Normalize features using Min-Max scaling (default) or z-score.
-    """
     keys = list(feature_dict.keys())
     values = np.array([feature_dict[k] for k in keys]).reshape(-1, 1)
 
@@ -338,16 +337,7 @@ for member, samples in member_plot_data.items():
     plt.tight_layout()
     plt.show()
 
-# Step 6 - Logistic Regression Classifier with Training Curves
-
-from sklearn.linear_model import SGDClassifier
-from sklearn.metrics import accuracy_score, classification_report, confusion_matrix, log_loss
-import matplotlib.pyplot as plt
-import numpy as np
-import pandas as pd
-import h5py
-import pickle
-import json
+# Step 6 
 
 WINDOW_SECONDS = 5
 SAMPLE_RATE = 100
@@ -375,9 +365,7 @@ def get_label(filename):
         return 1
     return None
 
-# ---------------------------------------------------
-# 1. Split FILES by class first (prevents leakage)
-# ---------------------------------------------------
+#Split files by class first (prevents leakage)
 walk_files = []
 jump_files = []
 
@@ -417,9 +405,7 @@ print("Train files:", len(train_files))
 print("Validation files:", len(val_files))
 print("Test files:", len(test_files))
 
-# ---------------------------------------------------
-# 2. Convert files into 5-second segments
-# ---------------------------------------------------
+#Convert files into 5-second segments
 train_segments = []
 val_segments = []
 test_segments = []
@@ -454,9 +440,7 @@ np.random.shuffle(val_segments)
 np.random.shuffle(test_segments)
 
 
-# ---------------------------------------------------
-# SAVE SEGMENTED DATA TO HDF5 (REQUIRED)
-# ---------------------------------------------------
+# SAVE SEGMENTED DATA TO HDF5
 with h5py.File("project_data.h5", "a") as f:
     segmented_group = f.require_group("segmented")
 
@@ -481,9 +465,7 @@ with h5py.File("project_data.h5", "a") as f:
 
 print("Segmented data saved to HDF5.")
 
-# ---------------------------------------------------
-# 3. Feature extraction
-# ---------------------------------------------------
+#Feature extraction
 X_train, y_train = [], []
 X_val, y_val = [], []
 X_test, y_test = [], []
@@ -523,17 +505,13 @@ print("Train -> Walking:", np.sum(y_train == 0), "Jumping:", np.sum(y_train == 1
 print("Val   -> Walking:", np.sum(y_val == 0), "Jumping:", np.sum(y_val == 1))
 print("Test  -> Walking:", np.sum(y_test == 0), "Jumping:", np.sum(y_test == 1))
 
-# ---------------------------------------------------
-# 4. Normalize using ONLY training data
-# ---------------------------------------------------
+#Normalize using ONLY training data
 scaler = StandardScaler()
 X_train = scaler.fit_transform(X_train)
 X_val = scaler.transform(X_val)
 X_test = scaler.transform(X_test)
 
-# ---------------------------------------------------
-# 5. Train logistic regression epoch-by-epoch
-# ---------------------------------------------------
+#Train logistic regression epoch-by-epoch
 epochs = 12
 model = SGDClassifier(
     loss="log_loss",      # logistic regression
@@ -584,9 +562,7 @@ for epoch in range(epochs):
         f"Train Acc: {train_acc:.4f} | Val Acc: {val_acc:.4f}"
     )
 
-# ---------------------------------------------------
-# 6. Final evaluation on test set
-# ---------------------------------------------------
+# Final evaluation on test set
 y_test_pred = model.predict(X_test)
 test_accuracy = accuracy_score(y_test, y_test_pred)
 cm = confusion_matrix(y_test, y_test_pred)
@@ -598,9 +574,7 @@ print(classification_report(y_test, y_test_pred, target_names=["Walking", "Jumpi
 print("\nConfusion Matrix:")
 print(cm)
 
-# ---------------------------------------------------
-# 7. Plot training curves
-# ---------------------------------------------------
+# Plot training curves
 epochs_range = range(1, epochs + 1)
 
 plt.figure(figsize=(10, 5))
@@ -625,9 +599,7 @@ plt.grid(True)
 plt.tight_layout()
 plt.show()
 
-# ---------------------------------------------------
-# 8. Save results
-# ---------------------------------------------------
+# Save results
 with open("step6_results.json", "w") as f:
     json.dump({
         "test_accuracy": float(test_accuracy),
@@ -653,9 +625,7 @@ import pandas as pd
 import numpy as np
 import pickle
 
-# ---------------------------
 # LOAD MODEL + FEATURE ORDER
-# ---------------------------
 with open("step6_model.pkl", "rb") as f:
     saved = pickle.load(f)
     model = saved["model"]
@@ -666,9 +636,7 @@ WINDOW_SECONDS = 5
 SAMPLE_RATE = 100
 SAMPLES_PER_WINDOW = WINDOW_SECONDS * SAMPLE_RATE
 
-# ---------------------------
-# SAME FEATURE FUNCTION (UNCHANGED)
-# ---------------------------
+# SAME FEATURE FUNCTION
 from scipy.stats import skew, kurtosis
 
 def extract_features(df):
@@ -692,9 +660,7 @@ def extract_features(df):
 
     return features
 
-# ---------------------------
 # SEGMENT
-# ---------------------------
 def segment_data(df):
     segments = []
     num_windows = len(df) // SAMPLES_PER_WINDOW
@@ -706,9 +672,7 @@ def segment_data(df):
 
     return segments
 
-# ---------------------------
-# APP
-# ---------------------------
+# APP (old); please refer to the step7_app.py file for the new app. Thanks.
 class App:
     def __init__(self, root):
         self.root = root
@@ -775,7 +739,7 @@ class App:
         for i, seg in enumerate(segments):
             feats = extract_features(seg.copy())
 
-            # 🔴 CRITICAL: match training order
+        
             X = np.array([feats[k] for k in feature_names]).reshape(1, -1)
 
             X = scaler.transform(X)
